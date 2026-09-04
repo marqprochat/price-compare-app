@@ -1,4 +1,5 @@
 import { webSearch, chatComplete } from './nineRouter.js';
+import { parseJsonResponse } from './jsonResponse.js';
 
 /**
  * Avalia a confiabilidade de uma loja/vendedor:
@@ -43,8 +44,7 @@ export async function assessReliability(storeName) {
   let summary = 'Não foi possível avaliar.';
   try {
     const raw = await chatComplete(messages);
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');
+    const parsed = parseJsonResponse(raw, {});
     level = parsed.level || level;
     summary = parsed.summary || summary;
   } catch {
