@@ -7,6 +7,7 @@ import { assessReliability } from './src/reliability.js';
 
 const app = express();
 app.use(express.json());
+app.use(express.static('public'));
 
 const USER_AGENT = 'Mozilla/5.0 (compatible; PriceCompareBot/1.0; +https://example.com/bot)';
 
