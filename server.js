@@ -1,9 +1,14 @@
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
-import { extractProduct } from './src/extractProduct.js';
+import { extractProduct, extractVisibleText } from './src/extractProduct.js';
 import { webSearch } from './src/nineRouter.js';
 import { assessReliability } from './src/reliability.js';
+import { buildSearchQuery, extractWithAI, reviewRound } from './src/aiAnalyst.js';
+import { isOutlier } from './src/priceSanity.js';
+import { mergeOffers, applyVerdicts, shouldRetry } from './src/offerRounds.js';
+
+const MAX_SEARCH_ROUNDS = 2;
 
 const app = express();
 app.use(express.json());
@@ -28,6 +33,32 @@ function domainOf(url) {
   }
 }
 
+/**
+ * Extrai nome/preço mecanicamente; se falhar ou ficar suspeito (preço
+ * ambíguo ou ausente), pede uma segunda opinião pra IA. Usa o resultado da
+ * IA só quando ela conseguir nome + preço; senão mantém o mecânico.
+ */
+async function extractProductWithFallback(html, pageUrl) {
+  const mechanical = extractProduct(html, pageUrl);
+  if (mechanical.blocked || (mechanical.name && !mechanical.suspicious)) {
+    return mechanical;
+  }
+  const text = extractVisibleText(html);
+  const ai = await extractWithAI(text, pageUrl);
+  if (ai.name && ai.price != null) {
+    return {
+      name: ai.name,
+      price: ai.price,
+      currency: ai.currency,
+      source: pageUrl,
+      method: 'ai',
+      blocked: false,
+      suspicious: false,
+    };
+  }
+  return mechanical;
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.post('/api/compare', async (req, res) => {
@@ -37,9 +68,9 @@ app.post('/api/compare', async (req, res) => {
   }
 
   try {
-    // 1. Extrai nome + preço do produto original
+    // 1. Extrai nome + preço do produto original (mecânico, com segunda opinião da IA se suspeito)
     const originalHtml = await fetchHtml(url);
-    const original = extractProduct(originalHtml, url);
+    const original = await extractProductWithFallback(originalHtml, url);
     if (original.blocked) {
       return res.status(422).json({
         error: 'Esse site bloqueou o acesso automatizado (página de verificação anti-bot) e não deixou ver o produto. Tente colar o link de outra loja.',
@@ -49,29 +80,50 @@ app.post('/api/compare', async (req, res) => {
       return res.status(422).json({ error: 'Não consegui identificar o produto nessa página.' });
     }
 
-    // 2. Busca o produto na web pra achar concorrentes
-    const search = await webSearch(`${original.name} preço comprar`, { maxResults: 8 });
-    const candidateUrls = (search.results || [])
-      .map((r) => r.url)
-      .filter((candidateUrl) => domainOf(candidateUrl) !== domainOf(url))
-      .slice(0, 5);
+    // 2. Monta a query de busca (a IA limpa o nome bruto; cai no nome bruto se falhar)
+    let query = await buildSearchQuery(original);
+    const originalDomain = domainOf(url);
 
-    // 3. Extrai preço de cada concorrente (em paralelo, tolerando falhas individuais)
-    const alternatives = await Promise.all(
-      candidateUrls.map(async (candidateUrl) => {
-        try {
-          const html = await fetchHtml(candidateUrl);
-          const extracted = extractProduct(html, candidateUrl);
-          return { ...extracted, store: domainOf(candidateUrl) };
-        } catch {
-          return null;
-        }
-      })
-    );
-    const validAlternatives = alternatives.filter((a) => a && a.price);
+    // 3. Roda até MAX_SEARCH_ROUNDS buscas, revisando em lote e refinando a query se preciso
+    let offers = [];
+    let roundsCompleted = 0;
+    let review = null;
 
-    // 4. Avalia a confiabilidade de cada loja envolvida (original + alternativas com preço encontrado)
-    const storeNames = [domainOf(url), ...validAlternatives.map((a) => a.store)];
+    while (roundsCompleted < MAX_SEARCH_ROUNDS) {
+      const search = await webSearch(`${query} preço comprar`, { maxResults: 8 });
+      const candidateUrls = (search.results || [])
+        .map((r) => r.url)
+        .filter((candidateUrl) => domainOf(candidateUrl) !== originalDomain)
+        .slice(0, 5);
+
+      const roundOffers = (
+        await Promise.all(
+          candidateUrls.map(async (candidateUrl) => {
+            try {
+              const html = await fetchHtml(candidateUrl);
+              const extracted = await extractProductWithFallback(html, candidateUrl);
+              if (extracted.blocked || !extracted.price) return null;
+              const suspicious = extracted.suspicious || isOutlier(extracted.price, original.price);
+              return { ...extracted, suspicious, store: domainOf(candidateUrl) };
+            } catch {
+              return null;
+            }
+          })
+        )
+      ).filter(Boolean);
+
+      offers = mergeOffers(offers, roundOffers);
+      roundsCompleted += 1;
+
+      review = await reviewRound(original, offers);
+      offers = applyVerdicts(offers, review.offers);
+
+      if (!shouldRetry(review, roundsCompleted, MAX_SEARCH_ROUNDS)) break;
+      query = review.betterQuery;
+    }
+
+    // 4. Avalia a confiabilidade de cada loja envolvida (original + ofertas que sobraram)
+    const storeNames = [originalDomain, ...offers.map((o) => o.store)];
     const uniqueStoreNames = [...new Set(storeNames)];
     const reliabilityByStore = {};
     await Promise.all(
@@ -81,15 +133,23 @@ app.post('/api/compare', async (req, res) => {
     );
 
     // 5. Monta a lista final, ordenada por preço
+    const originalOffer = {
+      ...original,
+      store: originalDomain,
+      verdict: 'ok',
+      verdictReason: null,
+      reliability: reliabilityByStore[originalDomain],
+    };
     const allOffers = [
-      { ...original, store: domainOf(url), reliability: reliabilityByStore[domainOf(url)] },
-      ...validAlternatives.map((a) => ({ ...a, reliability: reliabilityByStore[a.store] })),
+      originalOffer,
+      ...offers.map((o) => ({ ...o, reliability: reliabilityByStore[o.store] })),
     ].sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
 
-    const cheapest = allOffers[0];
-    const cheapestReliable = allOffers.find((o) => o.reliability?.level === 'alta') || cheapest;
+    const eligibleForBest = allOffers.filter((o) => o.verdict === 'ok');
+    const cheapest = eligibleForBest[0];
+    const cheapestReliable = eligibleForBest.find((o) => o.reliability?.level === 'alta') || cheapest;
 
-    res.json({ original, offers: allOffers, cheapest, cheapestReliable });
+    res.json({ original, offers: allOffers, cheapest, cheapestReliable, searchQuery: query });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao processar a comparação.', details: err.message });
