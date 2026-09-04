@@ -9,6 +9,7 @@ import { isOutlier } from './src/priceSanity.js';
 import { mergeOffers, applyVerdicts, shouldRetry } from './src/offerRounds.js';
 
 const MAX_SEARCH_ROUNDS = 2;
+const REQUEST_TIME_BUDGET_MS = 45000;
 
 const app = express();
 app.use(express.json());
@@ -97,6 +98,7 @@ app.post('/api/compare', async (req, res) => {
     let offers = [];
     let roundsCompleted = 0;
     let review = null;
+    const startedAt = Date.now();
 
     while (roundsCompleted < MAX_SEARCH_ROUNDS) {
       let search;
@@ -136,7 +138,8 @@ app.post('/api/compare', async (req, res) => {
       review = await reviewRound(original, offers);
       offers = applyVerdicts(offers, review.offers);
 
-      if (!shouldRetry(review, roundsCompleted, MAX_SEARCH_ROUNDS)) break;
+      const withinTimeBudget = Date.now() - startedAt < REQUEST_TIME_BUDGET_MS;
+      if (!withinTimeBudget || !shouldRetry(review, roundsCompleted, MAX_SEARCH_ROUNDS)) break;
       query = review.betterQuery;
     }
 

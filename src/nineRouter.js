@@ -5,7 +5,7 @@ const NINEROUTER_KEY = process.env.NINEROUTER_KEY || '';
 
 const client = axios.create({
   baseURL: NINEROUTER_URL,
-  timeout: 30000,
+  timeout: 10000,
   headers: NINEROUTER_KEY ? { Authorization: `Bearer ${NINEROUTER_KEY}` } : {},
 });
 
