@@ -40,6 +40,11 @@ app.post('/api/compare', async (req, res) => {
     // 1. Extrai nome + preço do produto original
     const originalHtml = await fetchHtml(url);
     const original = extractProduct(originalHtml, url);
+    if (original.blocked) {
+      return res.status(422).json({
+        error: 'Esse site bloqueou o acesso automatizado (página de verificação anti-bot) e não deixou ver o produto. Tente colar o link de outra loja.',
+      });
+    }
     if (!original.name) {
       return res.status(422).json({ error: 'Não consegui identificar o produto nessa página.' });
     }

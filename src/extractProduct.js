@@ -26,6 +26,28 @@ function parsePriceString(raw) {
   return Number.isFinite(value) ? value : null;
 }
 
+// Trechos típicos de páginas de verificação anti-bot (captcha, "acesse sua conta", etc.)
+// que alguns sites (ex: Mercado Livre) servem no lugar da página real quando detectam
+// tráfego automatizado. Quando isso acontece não há produto pra extrair — só a página de bloqueio.
+const BOT_BLOCK_MARKERS = [
+  /suspicious[_-]?traffic/i,
+  /account-verification/i,
+  /captcha/i,
+  /are you a human/i,
+  /verifique que você é humano/i,
+  /unusual traffic/i,
+  /robot check/i,
+  /attention required/i,
+  /just a moment/i,
+];
+
+function looksLikeBotBlock(html, title) {
+  if (BOT_BLOCK_MARKERS.some((re) => re.test(html))) return true;
+  // Título genérico do site (sem nome de produto nenhum) é outro sinal forte de bloqueio.
+  if (title && /^mercado li(v|b)re$/i.test(title.trim())) return true;
+  return false;
+}
+
 /**
  * Extrai nome + preço de uma página de produto, tentando (em ordem):
  * 1. JSON-LD schema.org/Product
@@ -35,10 +57,21 @@ function parsePriceString(raw) {
  * Cobre a maioria dos e-commerces com HTML renderizado no servidor.
  * Sites que montam o preço via JavaScript (SPA pura) não são cobertos aqui
  * — precisariam de um navegador headless (Playwright/Puppeteer).
+ *
+ * Alguns sites (ex: Mercado Livre) servem uma página de verificação anti-bot
+ * no lugar do produto quando detectam a requisição como automatizada; nesse caso
+ * o resultado vem com `blocked: true` em vez de nome/preço inventados a partir do bloqueio.
  */
 export function extractProduct(html, pageUrl) {
   const $ = cheerio.load(html);
-  const result = { name: null, price: null, currency: 'BRL', source: pageUrl, method: null };
+  const result = { name: null, price: null, currency: 'BRL', source: pageUrl, method: null, blocked: false };
+
+  const rawTitle = $('title').first().text().trim();
+  if (looksLikeBotBlock(html, rawTitle)) {
+    result.blocked = true;
+    result.method = 'blocked';
+    return result;
+  }
 
   $('script[type="application/ld+json"]').each((_, el) => {
     if (result.name && result.price) return;
