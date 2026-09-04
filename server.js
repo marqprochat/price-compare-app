@@ -69,7 +69,16 @@ app.post('/api/compare', async (req, res) => {
 
   try {
     // 1. Extrai nome + preço do produto original (mecânico, com segunda opinião da IA se suspeito)
-    const originalHtml = await fetchHtml(url);
+    let originalHtml;
+    try {
+      originalHtml = await fetchHtml(url);
+    } catch (err) {
+      console.error('Falha ao baixar a página original:', url, err.message);
+      return res.status(502).json({
+        error: 'Não consegui acessar essa página de produto agora (o site pode estar bloqueando, fora do ar, ou instável). Tente novamente em instantes.',
+        details: err.message,
+      });
+    }
     const original = await extractProductWithFallback(originalHtml, url);
     if (original.blocked) {
       return res.status(422).json({
@@ -90,7 +99,16 @@ app.post('/api/compare', async (req, res) => {
     let review = null;
 
     while (roundsCompleted < MAX_SEARCH_ROUNDS) {
-      const search = await webSearch(`${query} preço comprar`, { maxResults: 8 });
+      let search;
+      try {
+        search = await webSearch(`${query} preço comprar`, { maxResults: 8 });
+      } catch (err) {
+        console.error('Falha ao buscar concorrentes via 9router:', err.message);
+        return res.status(502).json({
+          error: 'Não consegui buscar lojas concorrentes agora (serviço de busca indisponível). Tente novamente em instantes.',
+          details: err.message,
+        });
+      }
       const candidateUrls = (search.results || [])
         .map((r) => r.url)
         .filter((candidateUrl) => domainOf(candidateUrl) !== originalDomain)
