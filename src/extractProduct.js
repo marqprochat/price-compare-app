@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { extractPriceCandidates, pickBestCandidate } from './priceSanity.js';
 
 /**
  * Converte uma string de preço (em qualquer formato comum, BR ou US) em número.
@@ -64,7 +65,7 @@ function looksLikeBotBlock(html, title) {
  */
 export function extractProduct(html, pageUrl) {
   const $ = cheerio.load(html);
-  const result = { name: null, price: null, currency: 'BRL', source: pageUrl, method: null, blocked: false };
+  const result = { name: null, price: null, currency: 'BRL', source: pageUrl, method: null, blocked: false, suspicious: false };
 
   const rawTitle = $('title').first().text().trim();
   if (looksLikeBotBlock(html, rawTitle)) {
@@ -118,12 +119,24 @@ export function extractProduct(html, pageUrl) {
 
   if (!result.price) {
     const bodyText = $('body').text();
-    const match = bodyText.match(/R\$\s?[\d.,]+/);
-    if (match) {
-      result.price = parsePriceString(match[0]);
+    const candidates = extractPriceCandidates(bodyText);
+    const { raw, suspicious } = pickBestCandidate(candidates);
+    if (raw) {
+      result.price = parsePriceString(raw);
       result.method = result.method || 'regex-fallback';
     }
+    if (suspicious) result.suspicious = true;
   }
 
   return result;
+}
+
+/**
+ * Texto visível de uma página (sem scripts/estilos), pra alimentar um LLM
+ * como segunda opinião de extração sem gastar tokens com HTML/JS irrelevante.
+ */
+export function extractVisibleText(html) {
+  const $ = cheerio.load(html);
+  $('script, style, noscript').remove();
+  return $('body').text().replace(/\s+/g, ' ').trim();
 }
