@@ -14,8 +14,11 @@ function offerCard(offer) {
   const level = offer.reliability?.level || 'desconhecida';
   const store = domain(offer.store || new URL(offer.source).hostname);
   const initials = store.replace(/[^a-z0-9]/gi, '').slice(0, 2).toUpperCase();
+  const warning = offer.verdict === 'duvidosa'
+    ? `<div class="offer-warning">⚠ ${offer.verdictReason || 'Verifique se é o mesmo produto antes de comprar.'}</div>`
+    : '';
   return `<article class="offer">
-    <div class="offer-name"><span class="store-avatar">${initials}</span><div><div class="store-name">${store}</div><div class="reliability ${level}"><i></i>${reliabilityLabel[level] || reliabilityLabel.desconhecida}</div></div></div>
+    <div class="offer-name"><span class="store-avatar">${initials}</span><div><div class="store-name">${store}</div><div class="reliability ${level}"><i></i>${reliabilityLabel[level] || reliabilityLabel.desconhecida}</div>${warning}</div></div>
     <div class="offer-price"><strong>${offer.price != null ? money(offer.price, offer.currency) : 'Consulte'}</strong><span>Preço encontrado</span></div>
     <a class="offer-link" href="${offer.source}" target="_blank" rel="noopener noreferrer">Ver oferta ↗</a>
   </article>`;
@@ -24,6 +27,13 @@ function offerCard(offer) {
 function showResults(data) {
   const offers = data.offers || [];
   document.querySelector('#product-name').textContent = data.original?.name || 'Ofertas para o produto';
+  const searchQueryEl = document.querySelector('#search-query');
+  if (data.searchQuery) {
+    searchQueryEl.textContent = `Buscamos por: "${data.searchQuery}"`;
+    searchQueryEl.hidden = false;
+  } else {
+    searchQueryEl.hidden = true;
+  }
   document.querySelector('#offer-count').textContent = `${offers.length} ${offers.length === 1 ? 'oferta' : 'ofertas'}`;
   const cheapest = data.cheapest;
   const reliable = data.cheapestReliable;
